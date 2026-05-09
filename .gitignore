@@ -29,3 +29,6 @@ dist-ssr
 .history/
 
 __pycache__/
+
+# Server scheduler DB (contains encrypted tokens — never commit)
+server/data/

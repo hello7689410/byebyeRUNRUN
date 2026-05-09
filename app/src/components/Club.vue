@@ -199,6 +199,91 @@
         <p class="text-xs text-cyan-100/80 leading-5">
           签退时间：{{ signTask.signBackTime || signTask.signBackLimitTime || '--' }}
         </p>
+
+        <div class="schedule-panel">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-xs font-semibold text-cyan-50">定时签到 / 签退提醒</p>
+              <p class="mt-1 text-[11px] leading-4 text-cyan-100/70">{{ scheduleStatusText }}</p>
+            </div>
+            <button
+              type="button"
+              class="schedule-toggle"
+              :class="scheduleConfig.enabled ? 'schedule-toggle-on' : 'schedule-toggle-off'"
+              @click="toggleScheduleEnabled"
+            >
+              {{ scheduleConfig.enabled ? '已开启' : '开启' }}
+            </button>
+          </div>
+
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <label class="schedule-field">
+              <span>签到时间</span>
+              <input v-model="scheduleConfig.signInTime" type="time" @change="persistScheduleConfig" />
+            </label>
+            <label class="schedule-field">
+              <span>签退时间</span>
+              <input v-model="scheduleConfig.signBackTime" type="time" @change="persistScheduleConfig" />
+            </label>
+          </div>
+
+          <div class="mt-3 flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-xs font-semibold text-cyan-50">
+                {{ schedulerConfigured ? '后端定时签到 / 签退' : '到点自动签到 / 签退' }}
+              </p>
+              <p class="mt-0.5 text-[11px] leading-4 text-cyan-100/70">
+                {{ schedulerConfigured ? '开启后会同步到后端定时任务（需保持后端服务运行）' : '开启后无需点「确认」，到点直接提交（请保持本页打开）' }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="schedule-toggle"
+              :class="scheduleConfig.autoExecute ? 'schedule-toggle-on' : 'schedule-toggle-off'"
+              @click="toggleScheduleAutoExecute"
+            >
+              {{ scheduleConfig.autoExecute ? '已开启' : '关闭' }}
+            </button>
+          </div>
+
+          <p
+            v-if="schedulerConfigured"
+            class="mt-2 text-[10px] leading-relaxed text-emerald-100/90 rounded-lg px-2 py-1.5 bg-emerald-950/25 border border-emerald-500/20"
+          >
+            已连接云端定时：到点由后端执行，无需保持本页打开；请长期运行 <span class="font-mono text-emerald-200/95">server</span>（见仓库
+            <span class="font-mono text-emerald-200/95">backend-club-sign-scheduler.md</span>）。
+          </p>
+          <p
+            v-else
+            class="mt-2 text-[10px] leading-relaxed text-cyan-100/80 rounded-lg px-2 py-1.5 bg-white/5 border border-white/10"
+          >
+            说明：当前未启用云端同步，「到点自动签到」只在<strong class="text-cyan-50">浏览器里</strong>跑，所以要保持本页打开。若已在
+            <span class="font-mono text-cyan-200/90">app/.env</span> 配置
+            <span class="font-mono text-cyan-200/90">VITE_CLUB_SCHEDULER_USE_DEV_PROXY=true</span> 或
+            <span class="font-mono text-cyan-200/90">VITE_CLUB_SCHEDULER_BASE</span> 并启动
+            <span class="font-mono text-cyan-200/90">server</span>，保存定时后会同步到后端，关页后仍可到点签到/签退。
+          </p>
+
+          <p class="mt-2 text-[10px] leading-relaxed text-cyan-100/65">
+            自动规则：上午场（开始早于 12:00）签到为开始前 6 分钟、签退为开始后 26 分钟；下午场（开始 ≥ 12:00）签到为开始前
+            6 分钟、签退为开始后 57 分钟。
+          </p>
+
+          <div class="mt-2 flex items-center justify-between gap-2">
+            <button type="button" class="schedule-secondary-btn" @click="fillScheduleFromTask">
+              使用活动时间（自动推算）
+            </button>
+            <button
+              v-if="pendingScheduledAction"
+              type="button"
+              class="schedule-primary-btn"
+              :disabled="signPendingType !== ''"
+              @click="confirmScheduledAction"
+            >
+              {{ pendingScheduledAction === '1' ? '确认签到' : '确认签退' }}
+            </button>
+          </div>
+        </div>
       </div>
 
       <div v-else class="mt-3 text-xs text-cyan-100/80">当前没有可执行签到/签退任务</div>
@@ -308,6 +393,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue';
 import { api } from '@/composables/useApi';
 import { useDataStore } from '@/composables/useDataStore';
+import { isClubSchedulerConfigured, syncClubScheduleToBackend } from '@/utils/clubSchedulerSync';
 
 const MAIN_TABS = [
   { key: 'activities', label: '活动列表' },
@@ -383,12 +469,23 @@ const historyLoadingMore = ref(false);
 
 const signTask = ref(null);
 const signPendingType = ref('');
+const scheduleConfig = ref({
+  enabled: false,
+  autoExecute: false,
+  activityId: '',
+  signInTime: '',
+  signBackTime: '',
+});
+const scheduleNow = ref(new Date());
+const pendingScheduledAction = ref('');
 
 const loading = ref(false);
 const clubActionPendingMap = ref({});
 const datePickerRef = ref(null);
 
 let ensureAuthPromise = null;
+let scheduleTimer = 0;
+let scheduleTickTimer = 0;
 
 const studentId = computed(() => {
   const value = Number(userInfo.value?.studentId || 0);
@@ -550,6 +647,34 @@ const signTaskAction = computed(() => {
   };
 });
 
+const scheduleStatusText = computed(() => {
+  if (!signTask.value) return '暂无可定时的签到任务';
+  if (pendingScheduledAction.value) {
+    return pendingScheduledAction.value === '1'
+      ? '已到签到时间，请确认后提交签到'
+      : '已到签退时间，请确认后提交签退';
+  }
+  if (!scheduleConfig.value.enabled) {
+    if (scheduleConfig.value.autoExecute) {
+      return '已选择自动执行，请打开上方「定时签到/签退提醒」开关';
+    }
+    return '开启定时后，可选择仅提醒或到点自动提交';
+  }
+
+  const nextRun = resolveNextScheduledRun();
+  if (!nextRun) return '请设置签到或签退时间';
+
+  if (scheduleConfig.value.autoExecute) {
+    return schedulerConfigured.value
+      ? `下一次后端自动执行：${nextRun.label} ${formatClock(nextRun.date)}（需保持后端服务运行）`
+      : `下一次自动执行：${nextRun.label} ${formatClock(nextRun.date)}（需保持本页在前台）`;
+  }
+
+  return `下一次提醒：${nextRun.label} ${formatClock(nextRun.date)}`;
+});
+
+const schedulerConfigured = computed(() => isClubSchedulerConfigured());
+
 watch(activeMainTab, async () => {
   selectedStatus.value = 'all';
   showFilters.value = false;
@@ -600,11 +725,17 @@ watch(showFilters, async (next) => {
 
 onMounted(async () => {
   document.addEventListener('click', handleDocumentClick);
+  loadScheduleConfig();
+  scheduleTickTimer = window.setInterval(() => {
+    scheduleNow.value = new Date();
+  }, 30000);
   await Promise.all([loadCurrentList(), loadSignTask()]);
+  armScheduleTimer();
 });
 
 onUnmounted(() => {
   document.removeEventListener('click', handleDocumentClick);
+  clearScheduleTimers();
 });
 
 function handleDocumentClick(event) {
@@ -617,6 +748,264 @@ function handleDocumentClick(event) {
 function selectQueryDate(value) {
   selectedQueryDate.value = value;
   showDateDropdown.value = false;
+}
+
+function loadScheduleConfig() {
+  if (typeof window === 'undefined') return;
+
+  try {
+    const raw = window.localStorage.getItem(getScheduleStorageKey());
+    if (!raw) return;
+
+    const parsed = JSON.parse(raw);
+    scheduleConfig.value = {
+      enabled: parsed?.enabled === true,
+      autoExecute: parsed?.autoExecute === true,
+      activityId: String(parsed?.activityId || ''),
+      signInTime: normalizeTimeValue(parsed?.signInTime),
+      signBackTime: normalizeTimeValue(parsed?.signBackTime),
+    };
+  } catch (error) {
+    console.warn('loadScheduleConfig failed:', error);
+  }
+}
+
+function persistScheduleConfig() {
+  scheduleConfig.value = {
+    ...scheduleConfig.value,
+    signInTime: normalizeTimeValue(scheduleConfig.value.signInTime),
+    signBackTime: normalizeTimeValue(scheduleConfig.value.signBackTime),
+    activityId: signTask.value?.activityId ? String(signTask.value.activityId) : '',
+  };
+
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(getScheduleStorageKey(), JSON.stringify(scheduleConfig.value));
+  }
+
+  if (isClubSchedulerConfigured() && token.value) {
+    syncClubScheduleToBackend(token.value, scheduleConfig.value).then((r) => {
+      if (!r.skipped && !r.ok && r.message) {
+        showMessage(`云端定时同步失败：${r.message}`, 'warning');
+      }
+    });
+  }
+
+  pendingScheduledAction.value = '';
+  armScheduleTimer();
+}
+
+function toggleScheduleEnabled() {
+  scheduleConfig.value.enabled = !scheduleConfig.value.enabled;
+  if (scheduleConfig.value.enabled && !scheduleConfig.value.signInTime && !scheduleConfig.value.signBackTime) {
+    fillScheduleFromTask({ silent: true });
+  }
+  persistScheduleConfig();
+  const msg = scheduleConfig.value.enabled
+    ? scheduleConfig.value.autoExecute
+      ? '定时已开启，到点将自动签到/签退'
+      : '定时提醒已开启'
+    : '定时已关闭';
+  showMessage(msg, 'success');
+}
+
+function toggleScheduleAutoExecute() {
+  scheduleConfig.value.autoExecute = !scheduleConfig.value.autoExecute;
+  if (scheduleConfig.value.autoExecute && !scheduleConfig.value.enabled) {
+    scheduleConfig.value.enabled = true;
+    if (!scheduleConfig.value.signInTime && !scheduleConfig.value.signBackTime) {
+      fillScheduleFromTask({ silent: true });
+    }
+  }
+  persistScheduleConfig();
+  showMessage(
+    scheduleConfig.value.autoExecute ? '已开启自动签到/签退' : '已关闭自动执行，仅保留到点提醒',
+    'success',
+  );
+}
+
+function fillScheduleFromTask(options = {}) {
+  const task = signTask.value;
+  if (!task) return;
+
+  const startDt = parseClubDateTime(task.startTime);
+  const inferred = startDt ? inferScheduleTimesFromActivity(startDt) : null;
+
+  scheduleConfig.value = {
+    ...scheduleConfig.value,
+    activityId: String(task.activityId || ''),
+    signInTime: inferred
+      ? inferred.signInTime
+      : normalizeTimeValue(task.signInTime || task.startTime) || scheduleConfig.value.signInTime,
+    signBackTime: inferred
+      ? inferred.signBackTime
+      : normalizeTimeValue(task.signBackTime || task.signBackLimitTime || task.endTime) ||
+        scheduleConfig.value.signBackTime,
+  };
+  persistScheduleConfig();
+
+  if (!options.silent) {
+    showMessage(inferred ? '已按活动时间自动推算签到/签退时刻' : '已填入活动时间', 'success');
+  }
+}
+
+function clearScheduleTimers() {
+  if (scheduleTimer) {
+    window.clearTimeout(scheduleTimer);
+    scheduleTimer = 0;
+  }
+  if (scheduleTickTimer) {
+    window.clearInterval(scheduleTickTimer);
+    scheduleTickTimer = 0;
+  }
+}
+
+function armScheduleTimer() {
+  if (scheduleTimer) {
+    window.clearTimeout(scheduleTimer);
+    scheduleTimer = 0;
+  }
+
+  scheduleNow.value = new Date();
+  if (!scheduleConfig.value.enabled || pendingScheduledAction.value) return;
+
+  const nextRun = resolveNextScheduledRun();
+  if (!nextRun) return;
+
+  const delay = Math.max(0, nextRun.date.getTime() - Date.now());
+  const scheduled = nextRun;
+  scheduleTimer = window.setTimeout(async () => {
+    scheduleNow.value = new Date();
+
+    if (scheduleConfig.value.autoExecute) {
+      const ok = await handleSignTask(scheduled.type);
+      if (!ok) {
+        pendingScheduledAction.value = scheduled.type;
+        showMessage('自动执行未成功，请手动点击重试', 'warning');
+      }
+      armScheduleTimer();
+      return;
+    }
+
+    pendingScheduledAction.value = scheduled.type;
+    showMessage(`${scheduled.label}时间已到，请确认执行`, 'warning');
+  }, delay);
+}
+
+async function confirmScheduledAction() {
+  const actionType = pendingScheduledAction.value;
+  if (!actionType) return;
+
+  pendingScheduledAction.value = '';
+  await handleSignTask(actionType);
+  armScheduleTimer();
+}
+
+function resolveNextScheduledRun() {
+  const task = signTask.value;
+  if (!task) return null;
+
+  const phase = resolveSignTaskPhase(task);
+  const candidates = [];
+  if (scheduleConfig.value.signInTime && phase !== 'signedIn' && phase !== 'completed') {
+    candidates.push({
+      type: '1',
+      label: '签到',
+      date: buildTodayTime(scheduleConfig.value.signInTime),
+    });
+  }
+  if (scheduleConfig.value.signBackTime && phase === 'signedIn') {
+    candidates.push({
+      type: '2',
+      label: '签退',
+      date: buildTodayTime(scheduleConfig.value.signBackTime),
+    });
+  }
+
+  const nowTime = scheduleNow.value.getTime();
+  return candidates
+    .filter((item) => item.date && item.date.getTime() >= nowTime)
+    .sort((a, b) => a.date.getTime() - b.date.getTime())[0];
+}
+
+function buildTodayTime(value) {
+  const normalized = normalizeTimeValue(value);
+  if (!normalized) return null;
+
+  const [hours, minutes] = normalized.split(':').map(Number);
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date;
+}
+
+function normalizeTimeValue(value) {
+  const match = String(value || '').match(/(\d{1,2}):(\d{2})/);
+  if (!match) return '';
+
+  const hours = Math.min(23, Math.max(0, Number(match[1])));
+  const minutes = Math.min(59, Math.max(0, Number(match[2])));
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function formatClock(date) {
+  if (!(date instanceof Date)) return '--:--';
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 解析活动时间字段（如 2026-05-08 08:00:00、ISO、纯 HH:mm 视为当天） */
+function parseClubDateTime(value) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  const full = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (full) {
+    const d = new Date(
+      Number(full[1]),
+      Number(full[2]) - 1,
+      Number(full[3]),
+      Number(full[4]),
+      Number(full[5]),
+      Number(full[6] || 0),
+      0,
+    );
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  const timeOnly = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (timeOnly) {
+    const d = new Date();
+    d.setHours(Number(timeOnly[1]), Number(timeOnly[2]), Number(timeOnly[3] || 0), 0);
+    return d;
+  }
+
+  const parsed = Date.parse(s);
+  if (!Number.isNaN(parsed)) return new Date(parsed);
+  return null;
+}
+
+/**
+ * 根据活动开始时刻推算定时签到/签退（与活动时间展示一致）。
+ * 上午场（开始时刻早于当天 12:00）：签到 = 开始前 6 分钟，签退 = 开始后 26 分钟。
+ * 下午场（开始时刻 ≥ 12:00）：签到 = 开始前 6 分钟，签退 = 开始后 57 分钟。
+ */
+function inferScheduleTimesFromActivity(startDate) {
+  if (!(startDate instanceof Date) || Number.isNaN(startDate.getTime())) return null;
+
+  const signInAt = new Date(startDate);
+  signInAt.setMinutes(signInAt.getMinutes() - 6);
+
+  const signBackAt = new Date(startDate);
+  const isMorning = startDate.getHours() < 12;
+  signBackAt.setMinutes(signBackAt.getMinutes() + (isMorning ? 26 : 57));
+
+  return {
+    signInTime: formatClock(signInAt),
+    signBackTime: formatClock(signBackAt),
+  };
+}
+
+function getScheduleStorageKey() {
+  return `byerun:club-sign-schedule:${studentId.value || 'guest'}`;
 }
 
 function isApiSuccess(data) {
@@ -1233,6 +1622,11 @@ async function loadSignTask() {
     }
 
     signTask.value = normalizeSignTask(data.response);
+    if (signTask.value && !scheduleConfig.value.activityId) {
+      scheduleConfig.value.activityId = String(signTask.value.activityId);
+    }
+    pendingScheduledAction.value = '';
+    armScheduleTimer();
   } catch (error) {
     signTask.value = null;
     console.error('loadSignTask failed:', error);
@@ -1265,18 +1659,18 @@ async function handleSignTask(signType) {
 
   if (!task || !normalizedSignType) {
     showMessage('当前没有可操作的签到/签退任务', 'warning');
-    return;
+    return false;
   }
 
   const authReady = await ensureAuthReady();
   if (!authReady) {
     showMessage('登录状态失效，请重新登录', 'error');
-    return;
+    return false;
   }
 
   if (!task.latitude || !task.longitude) {
     showMessage('签到坐标缺失，暂无法执行操作', 'error');
-    return;
+    return false;
   }
 
   signPendingType.value = normalizedSignType;
@@ -1294,14 +1688,16 @@ async function handleSignTask(signType) {
     const actionText = normalizedSignType === '1' ? '签到' : '签退';
     if (!isApiSuccess(data)) {
       showMessage(data?.msg || data?.message || `${actionText}失败`, 'error');
-      return;
+      return false;
     }
 
     showMessage(resolveResponseMessage(data, `${actionText}成功`), 'success');
     await Promise.all([loadSignTask(), loadCurrentList()]);
+    return true;
   } catch (error) {
     console.error('handleSignTask failed:', error);
     showMessage('签到/签退操作异常', 'error');
+    return false;
   } finally {
     signPendingType.value = '';
   }
@@ -1380,5 +1776,79 @@ async function handleClubAction(item, type) {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.schedule-panel {
+  margin-top: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(103, 232, 249, 0.22);
+  background: rgba(8, 47, 73, 0.34);
+  padding: 12px;
+}
+
+.schedule-toggle,
+.schedule-primary-btn,
+.schedule-secondary-btn {
+  height: 30px;
+  border-radius: 10px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease;
+}
+
+.schedule-toggle-on {
+  background: rgba(16, 185, 129, 0.9);
+  color: white;
+}
+
+.schedule-toggle-off,
+.schedule-secondary-btn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(207, 250, 254, 0.92);
+}
+
+.schedule-primary-btn {
+  background: rgba(6, 182, 212, 0.9);
+  color: white;
+}
+
+.schedule-primary-btn:disabled {
+  opacity: 0.68;
+}
+
+.schedule-field {
+  min-width: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 8px;
+}
+
+.schedule-field span {
+  display: block;
+  margin-bottom: 6px;
+  color: rgba(207, 250, 254, 0.72);
+  font-size: 11px;
+}
+
+.schedule-field input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: white;
+  font-size: 13px;
+  outline: none;
+}
+
+.schedule-field input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  opacity: 0.72;
 }
 </style>

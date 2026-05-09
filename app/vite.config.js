@@ -36,6 +36,12 @@ export default defineConfig(({ mode }) => {
           secure: false,
           rewrite: (path) => path.replace(/^\/autorunserver/, ''),
         },
+        /** 社团云端定时：与 backend-club-sign-scheduler.md 中 server 一致，开发时同源走代理可免 CORS */
+        '/api/club-schedules': {
+          target: env.VITE_SCHEDULER_PROXY_TARGET || 'http://127.0.0.1:8787',
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
   };
