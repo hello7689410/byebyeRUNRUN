@@ -99,6 +99,72 @@ async function initDb(logger) {
 
     CREATE INDEX IF NOT EXISTS idx_club_sign_runs_schedule ON club_sign_runs(schedule_id);
     CREATE INDEX IF NOT EXISTS idx_club_sign_runs_created ON club_sign_runs(created_at);
+
+    CREATE TABLE IF NOT EXISTS club_auto_join_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL UNIQUE,
+      school_id INTEGER NOT NULL,
+      token_enc TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      area_keywords TEXT NOT NULL DEFAULT '',
+      exclude_keywords TEXT NOT NULL DEFAULT '',
+      delay_minutes INTEGER NOT NULL DEFAULT 60,
+      max_days_ahead INTEGER NOT NULL DEFAULT 7,
+      prefer_earliest INTEGER NOT NULL DEFAULT 1,
+      timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS club_auto_join_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id INTEGER NOT NULL,
+      student_id INTEGER NOT NULL,
+      school_id INTEGER NOT NULL,
+      run_date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      selected_activity_id INTEGER,
+      selected_activity_name TEXT,
+      selected_activity_time TEXT,
+      selected_activity_area TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (rule_id) REFERENCES club_auto_join_rules(id) ON DELETE CASCADE,
+      UNIQUE (rule_id, run_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_club_auto_join_runs_rule ON club_auto_join_runs(rule_id);
+    CREATE INDEX IF NOT EXISTS idx_club_auto_join_runs_date ON club_auto_join_runs(run_date);
+
+    CREATE TABLE IF NOT EXISTS daily_run_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL UNIQUE,
+      token_enc TEXT NOT NULL,
+      school_id INTEGER,
+      map_id TEXT NOT NULL,
+      distance_m INTEGER NOT NULL,
+      cron_expr TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_run_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id INTEGER NOT NULL,
+      run_date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      response_code INTEGER,
+      response_brief TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (rule_id) REFERENCES daily_run_rules(id) ON DELETE CASCADE,
+      UNIQUE (rule_id, run_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_daily_run_runs_rule ON daily_run_runs(rule_id);
+    CREATE INDEX IF NOT EXISTS idx_daily_run_runs_date ON daily_run_runs(run_date);
   `);
 
   persist();

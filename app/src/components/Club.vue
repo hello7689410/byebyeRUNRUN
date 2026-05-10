@@ -284,6 +284,82 @@
             </button>
           </div>
         </div>
+
+        <div class="schedule-panel mt-2">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-xs font-semibold text-cyan-50">云端自动报名</p>
+              <p class="mt-1 text-[11px] leading-4 text-cyan-100/70">
+                今日云端签到+签退均成功后，延迟指定分钟，按区域关键词在可报名活动中自动报名（须运行 server，见
+                <span class="font-mono">自动报名技术方案.md</span>）。
+              </p>
+            </div>
+            <button
+              type="button"
+              class="schedule-toggle"
+              :class="autoJoinConfig.enabled ? 'schedule-toggle-on' : 'schedule-toggle-off'"
+              @click="toggleAutoJoinEnabled"
+            >
+              {{ autoJoinConfig.enabled ? '已开启' : '关闭' }}
+            </button>
+          </div>
+
+          <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label class="schedule-field">
+              <span>签退后延迟（分钟）</span>
+              <input
+                v-model.number="autoJoinConfig.delayMinutes"
+                type="number"
+                min="0"
+                max="1440"
+                class="w-full bg-transparent text-white text-sm"
+                @change="persistAutoJoinLocal"
+              />
+            </label>
+            <label class="schedule-field">
+              <span>最多查未来（天）</span>
+              <input
+                v-model.number="autoJoinConfig.maxDaysAhead"
+                type="number"
+                min="1"
+                max="30"
+                class="w-full bg-transparent text-white text-sm"
+                @change="persistAutoJoinLocal"
+              />
+            </label>
+            <label class="schedule-field sm:col-span-2">
+              <span>区域关键词（逗号/换行分隔，至少一个）</span>
+              <textarea
+                v-model="autoJoinConfig.areaKeywordsText"
+                rows="2"
+                class="w-full mt-1 bg-transparent text-white text-xs border-0 outline-none resize-y"
+                placeholder="例如：航空港、二田径场"
+                @change="persistAutoJoinLocal"
+              />
+            </label>
+            <label class="schedule-field sm:col-span-2">
+              <span>排除关键词（可选）</span>
+              <textarea
+                v-model="autoJoinConfig.excludeKeywordsText"
+                rows="2"
+                class="w-full mt-1 bg-transparent text-white text-xs border-0 outline-none resize-y"
+                placeholder="活动名称/地址含此词则跳过"
+                @change="persistAutoJoinLocal"
+              />
+            </label>
+            <label class="schedule-field sm:col-span-2 flex flex-row items-center gap-2 cursor-pointer">
+              <input v-model="autoJoinConfig.preferEarliest" type="checkbox" class="accent-cyan-400" @change="persistAutoJoinLocal" />
+              <span class="text-xs text-cyan-100/85">优先报名开始时间最早的活动</span>
+            </label>
+          </div>
+
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <button type="button" class="schedule-primary-btn" :disabled="autoJoinSavePending" @click="saveAutoJoinCloudRule">
+              {{ autoJoinSavePending ? '保存中…' : '保存到云端' }}
+            </button>
+            <span v-if="!schedulerConfigured" class="text-[10px] text-amber-200/90">未配置 VITE_CLUB_SCHEDULER_BASE 时无法同步</span>
+          </div>
+        </div>
       </div>
 
       <div v-else class="mt-3 text-xs text-cyan-100/80">当前没有可执行签到/签退任务</div>
@@ -394,6 +470,7 @@ import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue';
 import { api } from '@/composables/useApi';
 import { useDataStore } from '@/composables/useDataStore';
 import { isClubSchedulerConfigured, syncClubScheduleToBackend } from '@/utils/clubSchedulerSync';
+import { syncClubAutoJoinToBackend } from '@/utils/clubAutoJoinSync';
 
 const MAIN_TABS = [
   { key: 'activities', label: '活动列表' },
@@ -478,6 +555,16 @@ const scheduleConfig = ref({
 });
 const scheduleNow = ref(new Date());
 const pendingScheduledAction = ref('');
+
+const autoJoinConfig = ref({
+  enabled: false,
+  areaKeywordsText: '',
+  excludeKeywordsText: '',
+  delayMinutes: 60,
+  maxDaysAhead: 7,
+  preferEarliest: true,
+});
+const autoJoinSavePending = ref(false);
 
 const loading = ref(false);
 const clubActionPendingMap = ref({});
@@ -723,9 +810,16 @@ watch(showFilters, async (next) => {
   await loadItemOptions();
 });
 
+watch(studentId, () => {
+  loadScheduleConfig();
+  loadAutoJoinConfig();
+  armScheduleTimer();
+});
+
 onMounted(async () => {
   document.addEventListener('click', handleDocumentClick);
   loadScheduleConfig();
+  loadAutoJoinConfig();
   scheduleTickTimer = window.setInterval(() => {
     scheduleNow.value = new Date();
   }, 30000);
@@ -1006,6 +1100,84 @@ function inferScheduleTimesFromActivity(startDate) {
 
 function getScheduleStorageKey() {
   return `byerun:club-sign-schedule:${studentId.value || 'guest'}`;
+}
+
+function getAutoJoinStorageKey() {
+  return `byerun:club-auto-join:${studentId.value || 'guest'}`;
+}
+
+function loadAutoJoinConfig() {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(getAutoJoinStorageKey());
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    autoJoinConfig.value = {
+      enabled: parsed?.enabled === true,
+      areaKeywordsText: String(parsed?.areaKeywordsText || ''),
+      excludeKeywordsText: String(parsed?.excludeKeywordsText || ''),
+      delayMinutes: Math.min(1440, Math.max(0, Number(parsed?.delayMinutes) || 60)),
+      maxDaysAhead: Math.min(30, Math.max(1, Number(parsed?.maxDaysAhead) || 7)),
+      preferEarliest: parsed?.preferEarliest !== false,
+    };
+  } catch (e) {
+    console.warn('loadAutoJoinConfig failed:', e);
+  }
+}
+
+function persistAutoJoinLocal() {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(getAutoJoinStorageKey(), JSON.stringify(autoJoinConfig.value));
+}
+
+async function toggleAutoJoinEnabled() {
+  autoJoinConfig.value.enabled = !autoJoinConfig.value.enabled;
+  persistAutoJoinLocal();
+  if (!autoJoinConfig.value.enabled && isClubSchedulerConfigured() && token.value) {
+    const r = await syncClubAutoJoinToBackend(token.value, autoJoinConfig.value, schoolId.value);
+    if (!r.skipped && !r.ok && r.message) {
+      showMessage(`关闭云端自动报名失败：${r.message}`, 'warning');
+    }
+  }
+}
+
+async function saveAutoJoinCloudRule() {
+  if (!isClubSchedulerConfigured()) {
+    showMessage('请先在 app/.env 配置 VITE_CLUB_SCHEDULER_BASE 或 USE_DEV_PROXY', 'warning');
+    return;
+  }
+  if (!token.value) {
+    showMessage('请先登录', 'error');
+    return;
+  }
+  if (!schoolId.value) {
+    showMessage('缺少学校信息，无法同步', 'error');
+    return;
+  }
+  if (autoJoinConfig.value.enabled) {
+    const hasKw = String(autoJoinConfig.value.areaKeywordsText || '')
+      .split(/[\n,，;；]/)
+      .some((s) => s.trim());
+    if (!hasKw) {
+      showMessage('请填写至少一个区域关键词', 'warning');
+      return;
+    }
+  }
+  autoJoinSavePending.value = true;
+  try {
+    const r = await syncClubAutoJoinToBackend(token.value, autoJoinConfig.value, schoolId.value);
+    if (r.skipped) {
+      showMessage('云端地址未配置', 'warning');
+      return;
+    }
+    if (!r.ok) {
+      showMessage(r.message || '保存失败', 'error');
+      return;
+    }
+    showMessage(autoJoinConfig.value.enabled ? '云端自动报名规则已保存' : '已关闭云端自动报名', 'success');
+  } finally {
+    autoJoinSavePending.value = false;
+  }
 }
 
 function isApiSuccess(data) {

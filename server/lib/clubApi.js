@@ -117,6 +117,21 @@ async function fetchStudentIdFromToken(token) {
   return n;
 }
 
+async function fetchTokenProfile(token) {
+  const { data } = await apiRequest('GET', '/auth/query/token', { token });
+  if (!isApiSuccess(data)) {
+    throw new Error(data?.msg || data?.message || 'token 无效或已过期');
+  }
+  const r = data.response || {};
+  const studentId = Number(r.studentId ?? r.student_id);
+  const userId = Number(r.userId ?? r.user_id);
+  const schoolId = Number(r.schoolId ?? r.school_id);
+  if (!Number.isFinite(studentId) || studentId <= 0) throw new Error('query/token 未返回 studentId');
+  if (!Number.isFinite(userId) || userId <= 0) throw new Error('query/token 未返回 userId');
+  if (!Number.isFinite(schoolId) || schoolId <= 0) throw new Error('query/token 未返回 schoolId');
+  return { studentId, userId, schoolId };
+}
+
 async function fetchSignTask(token, studentId) {
   const params = { studentId };
   const { data } = await apiRequest('GET', '/clubactivity/getSignInTf', { token, params });
@@ -183,6 +198,43 @@ async function signInOrSignBack(token, studentId, signType) {
   return data;
 }
 
+function extractList(response) {
+  if (Array.isArray(response)) return response;
+  if (!response || typeof response !== 'object') return [];
+  const keys = ['records', 'list', 'rows', 'items', 'activityList'];
+  for (const key of keys) {
+    if (Array.isArray(response[key])) return response[key];
+  }
+  return [];
+}
+
+async function fetchClubActivities(token, { queryTime, schoolId, studentId, pageNo = 1, pageSize = 50 }) {
+  const params = {
+    pageNo: Number(pageNo) || 1,
+    pageSize: Number(pageSize) || 50,
+    queryTime: String(queryTime),
+    schoolId: Number(schoolId),
+    studentId: Number(studentId),
+  };
+  const { data } = await apiRequest('GET', '/clubactivity/queryActivityList', { token, params });
+  if (!isApiSuccess(data)) {
+    throw new Error(data?.msg || data?.message || '查询活动列表失败');
+  }
+  return extractList(data.response);
+}
+
+async function joinClubActivity(token, activityId, studentId) {
+  const params = {
+    activityId: Number(activityId),
+    studentId: Number(studentId),
+  };
+  const { data } = await apiRequest('GET', '/clubactivity/joinClubActivity', { token, params });
+  if (!isApiSuccess(data)) {
+    throw new Error(data?.msg || data?.message || '报名失败');
+  }
+  return data;
+}
+
 async function loginByPhone(phone, passwordPlain) {
   const body = {
     appVersion: APP_VERSION,
@@ -206,12 +258,55 @@ async function loginByPhone(phone, passwordPlain) {
   return { token: String(token), studentId: Number(studentId) };
 }
 
+async function fetchRunStandard(token, schoolId) {
+  const params = { schoolId: Number(schoolId) };
+  const { data } = await apiRequest('GET', '/unirun/query/runStandard', { token, params });
+  if (!isApiSuccess(data)) {
+    throw new Error(data?.msg || data?.message || '获取跑步标准失败');
+  }
+  return data.response || {};
+}
+
+async function saveRunRecord(
+  token,
+  { trackPoints, runDistance, runTime, userId, recordDate, yearSemester, brand, mobileType, sysVersion },
+) {
+  const body = {
+    againRunStatus: '0',
+    againRunTime: 0,
+    appVersions: APP_VERSION,
+    brand: String(brand || 'Apple'),
+    mobileType: String(mobileType || 'iPhone'),
+    sysVersions: String(sysVersion || '18.6'),
+    trackPoints: String(trackPoints || ''),
+    distanceTimeStatus: '1',
+    innerSchool: '1',
+    runDistance: Math.round(Number(runDistance)),
+    runTime: Math.round(Number(runTime)),
+    userId: Number(userId),
+    vocalStatus: '1',
+    yearSemester: String(yearSemester),
+    recordDate: String(recordDate),
+  };
+  const { data } = await apiRequest('POST', '/unirun/save/run/record/new', { token, body });
+  if (!isApiSuccess(data)) {
+    throw new Error(data?.msg || data?.message || `提交失败 code=${data?.code}`);
+  }
+  return data;
+}
+
 module.exports = {
   apiRequest,
   isApiSuccess,
+  extractList,
   fetchStudentIdFromToken,
+  fetchTokenProfile,
   fetchSignTask,
   signInOrSignBack,
+  fetchClubActivities,
+  joinClubActivity,
+  fetchRunStandard,
+  saveRunRecord,
   loginByPhone,
   getApiBase,
 };

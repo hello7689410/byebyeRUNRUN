@@ -12,7 +12,7 @@ export function isClubSchedulerConfigured() {
   return import.meta.env.VITE_CLUB_SCHEDULER_USE_DEV_PROXY === 'true';
 }
 
-function resolveSchedulerBaseUrl() {
+export function resolveSchedulerBaseUrl() {
   const base = trimBase(import.meta.env.VITE_CLUB_SCHEDULER_BASE);
   if (base) return base;
   if (import.meta.env.VITE_CLUB_SCHEDULER_USE_DEV_PROXY === 'true') return '';
@@ -20,7 +20,7 @@ function resolveSchedulerBaseUrl() {
 }
 
 /** @param {string} path 必须以 / 开头，如 /api/club-schedules */
-function schedulerUrl(path) {
+export function schedulerUrl(path) {
   const base = resolveSchedulerBaseUrl();
   if (base === null) return '';
   const p = path.startsWith('/') ? path : `/${path}`;

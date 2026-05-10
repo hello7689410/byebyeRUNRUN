@@ -1,7 +1,7 @@
 <template>
   <div v-if="props.inline || props.visible" :class="ui.wrapper" @click.self="handleWrapperClick">
     <div :class="ui.panel">
-      <div v-if="pinging" :class="ui.feedback">
+      <div v-if="loading" :class="ui.feedback">
         <i class="fa-brands fa-connectdevelop text-white text-3xl animate-bounce"></i>
         <p class="text-[10px] text-stone-600 font-black tracking-[0.3em] uppercase">连接服务中</p>
       </div>
@@ -28,7 +28,7 @@
         <div :class="ui.header">
           <div class="space-y-0.5">
             <h2 class="text-sm font-black text-stone-200 uppercase tracking-widest">定时任务</h2>
-            <p class="text-[9px] text-stone-700 font-mono">{{ versionLabel }}</p>
+            <p class="text-[9px] text-stone-700 font-mono">daily-run scheduler</p>
           </div>
           <div class="flex items-center gap-2">
             <span :class="['text-[10px] font-black px-2 py-1 rounded-lg border tracking-wide', enabledLabelClass]">
@@ -70,11 +70,24 @@
           </div>
 
           <div :class="ui.fieldItem">
+            <label class="text-[10px] font-black text-stone-600 uppercase tracking-widest ml-1">跑步里程（米）</label>
+            <div class="flex items-center bg-stone-900 border border-white/5 rounded-xl px-3 py-2">
+              <input
+                v-model.number="form.distance"
+                type="number"
+                min="100"
+                step="1"
+                class="w-full bg-transparent text-sm text-white outline-none"
+              />
+            </div>
+          </div>
+
+          <div :class="ui.fieldItem">
             <label class="text-[10px] font-black text-stone-600 uppercase tracking-widest ml-1">运行时间</label>
             <div class="flex items-center gap-2">
               <div class="flex-1 flex items-center bg-stone-900 border border-white/5 rounded-xl p-1">
                 <select
-                  v-model="timeObj.h"
+                  v-model.number="timeObj.h"
                   class="w-full bg-transparent text-center text-sm font-mono text-white outline-none appearance-none py-1"
                 >
                   <option v-for="h in 24" :key="h - 1" :value="h - 1" class="bg-stone-900 text-white">
@@ -86,7 +99,7 @@
               <span class="text-stone-800 font-bold">:</span>
               <div class="flex-1 flex items-center bg-stone-900 border border-white/5 rounded-xl p-1">
                 <select
-                  v-model="timeObj.m"
+                  v-model.number="timeObj.m"
                   class="w-full bg-transparent text-center text-sm font-mono text-white outline-none appearance-none py-1"
                 >
                   <option v-for="m in 60" :key="m - 1" :value="m - 1" class="bg-stone-900 text-white">
@@ -133,10 +146,10 @@
 
 <script setup>
 import { ref, reactive, computed, watch, inject } from 'vue';
-import { scheduledTaskConfig } from '@/utils/config';
 import { useDataStore } from '@/composables/useDataStore';
-import { AutorunClient } from '@/composables/autorun-sdk';
-import { useAutorunPingMeta } from '@/composables/useAutorunPingMeta';
+import { loadMapFiles, getMapNames } from '@/utils/map';
+import { isClubSchedulerConfigured } from '@/utils/clubSchedulerSync';
+import { getDailyRunRule, saveDailyRunRule, removeDailyRunRule } from '@/utils/dailyRunSync';
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -144,21 +157,20 @@ const props = defineProps({
 });
 const emit = defineEmits(['update:visible', 'saved']);
 const showMessage = inject('showMessage', (msg) => alert(msg));
-
 const { token } = useDataStore();
-const { pingMeta } = useAutorunPingMeta();
-const API_BASE = (scheduledTaskConfig.apiBaseUrl || '').replace(/\/$/, '');
-const autorunClient = new AutorunClient({ baseURL: API_BASE });
 
-const pinging = ref(true);
+const loading = ref(true);
 const initError = ref(null);
 const submitting = ref(false);
 const showMapList = ref(false);
-const serviceVersion = ref('--');
+const todayRun = ref(null);
 
 const maps = ref([]);
-const status = ref(null);
-const form = ref({ map_id: '', enabled: false });
+const form = ref({
+  map_id: '',
+  enabled: false,
+  distance: 4631,
+});
 const timeObj = reactive({ h: 8, m: 0 });
 
 const ui = computed(() =>
@@ -192,42 +204,22 @@ const ui = computed(() =>
       },
 );
 
-const versionLabel = computed(() => {
-  const raw = String(serviceVersion.value || '--');
-  return `${raw.startsWith('v') ? raw : `v${raw}`} BETA`;
-});
-
-const getDatePart = (value) => {
-  const match = String(value || '').trim().match(/^\d{4}-\d{2}-\d{2}/);
-  return match ? match[0] : '';
+const parseCronToTime = (cronExpr) => {
+  if (!cronExpr) return { h: 8, m: 0 };
+  const parts = String(cronExpr).trim().split(/\s+/);
+  if (parts.length < 2) return { h: 8, m: 0 };
+  const minute = Number(parts[0]);
+  const hour = Number(parts[1]);
+  return {
+    h: Number.isInteger(hour) ? Math.max(0, Math.min(23, hour)) : 8,
+    m: Number.isInteger(minute) ? Math.max(0, Math.min(59, minute)) : 0,
+  };
 };
-
-const getTodayDatePart = () => {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${now.getFullYear()}-${month}-${day}`;
-};
-
-const isTruthyFlag = (value) => value === true || value === 1 || value === '1';
 
 const isCompletedToday = computed(() => {
-  const current = status.value || {};
-
-  if (current.executed !== undefined && current.executed !== null) {
-    return isTruthyFlag(current.executed);
-  }
-
-  const lastRunDate = getDatePart(current.last_run_at);
-  const lastRunAtToday = lastRunDate !== '' && lastRunDate === getTodayDatePart();
-
-  if (current.scheduled !== undefined && current.scheduled !== null) {
-    return isTruthyFlag(current.scheduled) && (lastRunAtToday || !current.last_run_at);
-  }
-
-  return lastRunAtToday;
+  const st = String(todayRun.value?.status || '').trim();
+  return st === 'ok' || st === 'external';
 });
-
 const statusLabelText = computed(() => (isCompletedToday.value ? '已完成' : '待执行'));
 const statusLabelClass = computed(() =>
   isCompletedToday.value
@@ -240,11 +232,10 @@ const enabledLabelClass = computed(() =>
     ? 'text-cyan-300 border-cyan-500/30 bg-cyan-500/10'
     : 'text-stone-400 border-stone-600/40 bg-stone-700/20',
 );
-
 const currentMapName = computed(() => {
   const selectedId = String(form.value.map_id || '');
   const map = maps.value.find((m) => String(m.id) === selectedId);
-  return map ? map.name : 'Loading...';
+  return map ? map.name : '选择地图';
 });
 
 const selectMap = (map) => {
@@ -252,111 +243,85 @@ const selectMap = (map) => {
   showMapList.value = false;
 };
 
-const getAuthToken = () => {
-  const value = token.value || '';
-  if (!value) {
-    throw new Error('Missing auth token');
-  }
-  return value;
-};
-
-const parseCronToTime = (cronExpr) => {
-  if (!cronExpr) return { h: 8, m: 0 };
-
-  const parts = String(cronExpr).trim().split(/\s+/);
-  if (parts.length < 2) return { h: 8, m: 0 };
-
-  const minute = Number(parts[0]);
-  const hour = Number(parts[1]);
-
-  return {
-    h: Number.isInteger(hour) ? Math.max(0, Math.min(23, hour)) : 8,
-    m: Number.isInteger(minute) ? Math.max(0, Math.min(59, minute)) : 0,
-  };
-};
-
-const applyInitPayload = ({ mapsData, configData, statusData, version }) => {
-  const list = Array.isArray(mapsData?.maps)
-    ? mapsData.maps
-    : Array.isArray(mapsData)
-      ? mapsData
-      : Array.isArray(mapsData?.list)
-        ? mapsData.list
-        : [];
-
-  maps.value = list;
-
-  const defaultMapId = mapsData?.default || mapsData?.default_map_id || list[0]?.id || '';
-  form.value.map_id = configData?.map_id || configData?.mapId || defaultMapId;
-
-  form.value.enabled = isTruthyFlag(configData?.enabled);
-
-  const { h, m } = parseCronToTime(configData?.cron_expr || configData?.cron);
-  timeObj.h = h;
-  timeObj.m = m;
-  status.value = statusData || null;
-  serviceVersion.value = version || serviceVersion.value || '--';
-};
-
-const fetchInitPayload = async () => {
-  if (!API_BASE) {
-    throw new Error('Scheduled task service URL is not configured');
-  }
-  const currentToken = getAuthToken();
-  const [mapsEnvelope, configEnvelope, statusEnvelope] = await Promise.all([
-    autorunClient.getMaps(),
-    autorunClient.getConfig(currentToken),
-    autorunClient.getStatus(currentToken),
-  ]);
-
-  return {
-    version: pingMeta.value?.version ? String(pingMeta.value.version) : '--',
-    mapsData: mapsEnvelope?.data,
-    configData: configEnvelope?.data,
-    statusData: statusEnvelope?.data,
-  };
+const initMaps = async () => {
+  await loadMapFiles();
+  const names = getMapNames();
+  maps.value = Object.keys(names).map((id) => ({ id, name: names[id] }));
+  if (!form.value.map_id && maps.value.length > 0) form.value.map_id = maps.value[0].id;
 };
 
 const init = async () => {
-  pinging.value = true;
+  loading.value = true;
   initError.value = null;
-
   try {
-    const payload = await fetchInitPayload();
-    applyInitPayload(payload);
+    await initMaps();
+    if (!isClubSchedulerConfigured()) {
+      throw new Error('Scheduled task service URL is not configured');
+    }
+    if (!token.value) {
+      throw new Error('Missing auth token');
+    }
+    const resp = await getDailyRunRule(token.value);
+    if (resp?.rule) {
+      form.value.map_id = String(resp.rule.mapId || form.value.map_id || '');
+      form.value.enabled = !!resp.rule.enabled;
+      form.value.distance = Number(resp.rule.distance || form.value.distance || 4631);
+      const { h, m } = parseCronToTime(resp.rule.cron);
+      timeObj.h = h;
+      timeObj.m = m;
+    }
+    todayRun.value = resp?.todayRun || null;
   } catch (err) {
-    console.error('AutoRun init error:', err);
-    initError.value = err.message || 'Unknown error';
+    console.error('daily-run init error:', err);
+    initError.value = err?.message || 'Unknown error';
   } finally {
-    pinging.value = false;
+    loading.value = false;
   }
 };
 
 const handleSave = async () => {
   if (!form.value.map_id) {
-    showMessage('Please select a map', 'error');
+    showMessage('请选择地图', 'error');
     return;
   }
-
+  if (!Number.isInteger(Number(form.value.distance)) || Number(form.value.distance) < 100) {
+    showMessage('里程需为大于等于 100 的整数', 'error');
+    return;
+  }
+  if (!token.value) {
+    showMessage('请先登录', 'error');
+    return;
+  }
   submitting.value = true;
   try {
-    const currentToken = getAuthToken();
-    const cronExpr = String(timeObj.m) + ' ' + String(timeObj.h) + ' * * *';
+    if (!form.value.enabled) {
+      const r = await removeDailyRunRule(token.value);
+      if (r?.ok === false) throw new Error(r.message || '关闭失败');
+      todayRun.value = null;
+      showMessage('已关闭定时任务', 'success');
+      emit('saved');
+      return;
+    }
 
-    await autorunClient.register(currentToken, {
-      map_id: form.value.map_id,
-      enabled: form.value.enabled ? 1 : 0,
-      cron: cronExpr,
+    const tz =
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+        : 'Asia/Shanghai';
+    const saveResp = await saveDailyRunRule(token.value, {
+      enabled: true,
+      mapId: String(form.value.map_id),
+      distance: Number(form.value.distance),
+      hour: Number(timeObj.h),
+      minute: Number(timeObj.m),
+      timezone: tz,
     });
-
-    const latestStatusEnvelope = await autorunClient.getStatus(currentToken);
-    const latestStatus = latestStatusEnvelope?.data || null;
-    status.value = latestStatus;
-
+    if (saveResp?.ok === false) throw new Error(saveResp.message || '保存失败');
+    const latest = await getDailyRunRule(token.value);
+    todayRun.value = latest?.todayRun || null;
     showMessage('Settings updated', 'success');
     emit('saved');
   } catch (err) {
-    showMessage(err.message || 'Save failed', 'error');
+    showMessage(err?.message || 'Save failed', 'error');
   } finally {
     submitting.value = false;
   }
@@ -368,9 +333,7 @@ const close = () => {
 };
 
 const handleWrapperClick = () => {
-  if (!props.inline) {
-    close();
-  }
+  if (!props.inline) close();
 };
 
 watch(
@@ -378,9 +341,7 @@ watch(
   (current, previous) => {
     const shouldInitInline = current.inline && !previous?.inline;
     const shouldInitModal = current.visible && !previous?.visible;
-    if (shouldInitInline || shouldInitModal) {
-      init();
-    }
+    if (shouldInitInline || shouldInitModal) init();
   },
   { immediate: true },
 );
