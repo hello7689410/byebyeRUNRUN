@@ -100,6 +100,24 @@ async function initDb(logger) {
     CREATE INDEX IF NOT EXISTS idx_club_sign_runs_schedule ON club_sign_runs(schedule_id);
     CREATE INDEX IF NOT EXISTS idx_club_sign_runs_created ON club_sign_runs(created_at);
 
+    CREATE TABLE IF NOT EXISTS club_sign_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      schedule_id INTEGER,
+      student_id INTEGER,
+      run_date TEXT NOT NULL,
+      action TEXT,
+      event_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      metadata TEXT,
+      unique_key TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (unique_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_club_sign_audit_date ON club_sign_audit_logs(run_date);
+    CREATE INDEX IF NOT EXISTS idx_club_sign_audit_schedule ON club_sign_audit_logs(schedule_id);
+
     CREATE TABLE IF NOT EXISTS club_auto_join_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       student_id INTEGER NOT NULL UNIQUE,

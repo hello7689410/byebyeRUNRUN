@@ -92,6 +92,13 @@ function all(db, sql, params = []) {
   return rows;
 }
 
+function tableExists(db, tableName) {
+  const rows = all(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [
+    tableName,
+  ]);
+  return rows.length > 0;
+}
+
 function normalizeActionText(action) {
   if (action === 'sign_in') return '签到';
   if (action === 'sign_out') return '签退';
@@ -193,6 +200,15 @@ function buildReport(schedules, runs, date) {
   });
 }
 
+function buildAuditSummary(audits) {
+  const counts = {};
+  for (const row of audits) {
+    const key = `${row.event_type}:${row.status}`;
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
+}
+
 function printReport(report, dbPath) {
   console.log(`数据库: ${dbPath}`);
   if (report.length === 0) {
@@ -227,6 +243,38 @@ function printReport(report, dbPath) {
   }
 }
 
+function printAudits(audits) {
+  if (!audits.length) {
+    console.log('');
+    console.log('审计日志: 暂无。若后端刚升级，请等待下一次 cron 扫描。');
+    return;
+  }
+
+  console.log('');
+  console.log('审计日志汇总:');
+  const summary = buildAuditSummary(audits);
+  for (const [key, count] of Object.entries(summary)) {
+    console.log(`- ${key}: ${count}`);
+  }
+
+  console.log('');
+  console.log('最近审计日志:');
+  console.log('时间                 学生ID      动作      事件              状态      说明');
+  console.log('-------------------  ----------  --------  ----------------  --------  ----------------');
+  for (const row of audits.slice(-20).reverse()) {
+    console.log(
+      [
+        String(row.created_at || '-').padEnd(19, ' '),
+        String(row.student_id || '-').padEnd(10, ' '),
+        normalizeActionText(row.action).padEnd(8, ' '),
+        String(row.event_type || '-').padEnd(16, ' '),
+        String(row.status || '-').padEnd(8, ' '),
+        String(row.message || '-'),
+      ].join('  '),
+    );
+  }
+}
+
 const args = parseArgs(process.argv.slice(2));
 const env = { ...parseDotenv(path.join(serverRoot, '.env')), ...process.env };
 const dbPath = path.resolve(
@@ -253,12 +301,26 @@ try {
         [date, studentId],
       )
     : all(db, 'SELECT * FROM club_sign_runs WHERE run_date = ? ORDER BY created_at', [date]);
+  const audits = tableExists(db, 'club_sign_audit_logs')
+    ? studentId
+      ? all(
+          db,
+          'SELECT * FROM club_sign_audit_logs WHERE run_date = ? AND student_id = ? ORDER BY created_at, id',
+          [date, studentId],
+        )
+      : all(
+          db,
+          'SELECT * FROM club_sign_audit_logs WHERE run_date = ? ORDER BY created_at, id',
+          [date],
+        )
+    : [];
   const report = buildReport(schedules, runs, date);
 
   if (args.json) {
-    console.log(JSON.stringify({ ok: true, dbPath, date, report }, null, 2));
+    console.log(JSON.stringify({ ok: true, dbPath, date, report, audits }, null, 2));
   } else {
     printReport(report, dbPath);
+    printAudits(audits);
   }
   db.close();
 } catch (error) {

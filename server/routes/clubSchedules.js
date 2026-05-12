@@ -139,6 +139,54 @@ function createClubSchedulesRouter(db) {
     }
   });
 
+  /** 管理用途：列出当天调度审计日志，能看到未到点/解密失败/重复跳过等非接口调用路径 */
+  router.get('/audit/today', (req, res) => {
+    try {
+      const secret = process.env.SCHEDULER_ADMIN_SECRET;
+      if (!secret || req.headers['x-scheduler-admin'] !== secret) {
+        return res.status(403).json({ ok: false, message: 'Forbidden' });
+      }
+      const tz = String(req.query.tz || 'Asia/Shanghai');
+      const day = req.query.date ? String(req.query.date).slice(0, 10) : DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
+      let rows;
+      if (req.query.studentId) {
+        const sid = Number(req.query.studentId);
+        rows = db
+          .prepare(
+            `SELECT * FROM club_sign_audit_logs
+             WHERE run_date = ? AND student_id = ?
+             ORDER BY created_at DESC, id DESC`,
+          )
+          .all(day, sid);
+      } else {
+        rows = db
+          .prepare(
+            `SELECT * FROM club_sign_audit_logs
+             WHERE run_date = ?
+             ORDER BY created_at DESC, id DESC`,
+          )
+          .all(day);
+      }
+
+      return res.json({
+        ok: true,
+        today: day,
+        audits: rows.map((row) => ({
+          ...row,
+          metadata: (() => {
+            try {
+              return row.metadata ? JSON.parse(row.metadata) : {};
+            } catch {
+              return {};
+            }
+          })(),
+        })),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, message: e.message || String(e) });
+    }
+  });
+
   return router;
 }
 
